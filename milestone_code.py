@@ -6,7 +6,10 @@ Created on Tue Nov 13 06:44:36 2018
 @author: jackieff, vkozlow, margalan
 
 CS 229 Final Project code
-All instructions included as comments within the code
+This is for the final version, everything done previously for the milestone is
+included in the "milestone_code.py" file.
+
+We ran the code bit by bit, so many variable names are reused.
 """
 #importing libraries
 import os
@@ -42,6 +45,8 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import BaggingClassifier
 from sklearn import model_selection
 from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import VotingClassifier
+from sklearn.model_selection import KFold
 
 #changing default parameters for plotting with matplotlib
 rcParams['mathtext.fontset'] = 'stix'
@@ -238,6 +243,9 @@ for num,i in enumerate(np.unique(df_functional['quantity_group'])):
     df_functional['quantity_'+str(i)] = a[:,num]
 df_functional = df_functional.drop(columns = 'quantity_group')
 
+
+###### Functionality Prediction #######
+
 #filling NANs with mean of variable
 df_func = df_functional.fillna(df_functional.mean())
 
@@ -248,40 +256,10 @@ x_train, x_test, y_train, y_test = train_test_split(df_func.drop(columns='labels
 classes=['Functional', 'Needs Repair', 'Non-Functional']
 
 #Encoding the three output classes into integers
-enc = preprocessing.LabelEncoder()
-enc.fit(y_train)
-train_labels = enc.transform(y_train)
 
 enc = preprocessing.LabelEncoder()
 enc.fit(y_test)
 test_labels = enc.transform(y_test)
-
-#Logistic Regression for Functionality Prediction
-logreg = LogisticRegression()
-logreg.fit(x_train,train_labels)
-y_pred=logreg.predict(x_test)
-
-acc = metrics.confusion_matrix(test_labels,y_pred)
-
-plot_confusion_matrix(acc, classes,
-                      title = 'Logistic Regression Confusion Matrix', normalize=True)
-
-probs = logreg.predict_proba(x_test)
-
-#examining predicted probabilities for each class
-plt.figure(figsize = (10,6))
-plt.bar(range(14850),probs[:,0], color = 'green', label = 'Functional')
-plt.bar(range(14850),probs[:,2], color = 'red', label = 'Non Functional')
-plt.bar(range(14850),probs[:,1], color = 'blue', label = 'Needs Repair')
-plt.grid(True, which='both')
-plt.legend()
-
-"""
-We wanted to inspect the probabilities to see if there were cases where the highest
-and second highest probabilities were extremely close, in which case we know we
-are not that confident that a given sample belongs in the highest probability class.
-"""
-
 
 # SMOTE resampling to deal with class imbalance
 sm = SMOTE()
@@ -291,72 +269,252 @@ enc = preprocessing.LabelEncoder()
 enc.fit(y_res)
 train_labels = enc.transform(y_res)
 
+## LR
 logreg = LogisticRegression()
 logreg.fit(x_res,train_labels)
 y_pred=logreg.predict(x_test)
 
 lr_acc = metrics.confusion_matrix(test_labels,y_pred)
 
-plot_confusion_matrix(lr_acc, classes,title = 'Logistic Regression - SMOTE Confusion Matrix', normalize=True)
+plot_confusion_matrix(lr_acc, classes,title = 'Logistic Regression', normalize=True)
 
+#optimizing hyperparameters
+"""
+We used GridSearchCV which performs k-fold cross validation (k=5 for us) and searches
+a grid of specified parameters to find the best parameters.
+"""
+param_dist = {
+'penalty': ['l1','l2'],
+'C': [0.001,0.01,0.5,1]
+}
 
-#### GDA #####
-clf = LinearDiscriminantAnalysis()
-clf.fit(x_train, y_train)
-gda_pred = clf.predict(x_test)
+lr_search= GridSearchCV(LogisticRegression(solver='liblinear', multi_class='auto'),param_dist,cv=5)
+lr_search.fit(x_res,y_res)
 
+lr_best = lr_search.best_estimator_ #best classifier found with GridSearchCV
 
-acc = metrics.confusion_matrix(y_test,gda_pred)
+lr_preds = lr_best.predict(x_test)
+train_preds = lr_best.predict(x_res)
 
+a = metrics.confusion_matrix(y_test,lr_preds)
+plot_confusion_matrix(a, classes,title = 'Logistic Regression with L2 Penalty, C = 1'), normalize=True)
+
+#calculating microaveraged F1 scores for train and test
+f1_LR_train = metrics.f1_score(y_res,train_preds,average = 'micro')
+f1_LR_test = metrics.f1_score(y_test,lr_preds,average = 'micro')
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+#getting the indices for the 5-fold cross validation of the test set (25% of original data)
+kf = KFold(n_splits=5)
+k_indices = []
+for _, test_index in kf.split(x_test):
+    k_indices.append(test_index)
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = lr_best.predict(x_res)
+    test_preds = lr_best.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### RF optimizing hyperparameters
+parameters = {'n_estimators':(100,70,50),'max_depth':(30,25,20,5)}
+rf = RandomForestClassifier(criterion = 'entropy',min_samples_leaf = 5, min_samples_split = 10)
+rf_cv = GridSearchCV(rf,parameters,cv=5,verbose=3)
+rf_cv.fit(x_res,y_res)
+
+rf_best = rf_cv.best_estimator_
+
+#train and test predictions
+train_rf_pred = rf_best.predict(x_res)
+rf_pred = rf_best.predict(x_test)
+
+#calculating microaveraged F1 scores for train and test
+f1_rf_train = metrics.f1_score(y_res,train_rf_pred,average = 'micro')
+f1_rf_test = metrics.f1_score(y_test,rf_pred,average = 'micro')
+
+a =metrics.confusion_matrix(y_test,rf_pred)
+plot_confusion_matrix(a, classes,title = 'Random Forest, 70 Estimators', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = rf_best.predict(x_res)
+    test_preds = rf_best.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### Bagging optimizing hyperparameters
+bag = BaggingClassifier()
+bag.fit(x_res,y_res)
+bag_pred = bag.predict(x_test)
+acc = metrics.confusion_matrix(y_test,bag_pred)
 plot_confusion_matrix(acc, classes,
-                      title='GDA Confusion Matrix', normalize=True)
+                      title='Bagging', normalize=True)
 
-# GDA with SMOTE
-clf = LinearDiscriminantAnalysis()
-clf.fit(x_res, y_res)
-gda_pred = clf.predict(x_test)
+parameters = {'n_estimators':(100,70,50),'max_samples':(20,10,5),'max_features':(138,70,25)}
+bag_cv = GridSearchCV(bag,parameters,cv=5,verbose=3)
+bag_cv.fit(x_res,y_res)
 
-acc = metrics.confusion_matrix(y_test,gda_pred)
+bag_best = bag_cv.best_estimator_
 
+#train and test predictions
+train_bag_pred = bag_best.predict(x_res)
+bag_pred = bag_best.predict(x_test)
+
+#calculating microaveraged F1 scores for train and test
+f1_bag_train = metrics.f1_score(y_res,train_bag_pred,average = 'micro')
+f1_bag_test = metrics.f1_score(y_test,bag_pred,average = 'micro')
+
+a =metrics.confusion_matrix(y_test,bag_pred)
+plot_confusion_matrix(a, classes,title = 'Bagging', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = bag_best.predict(x_res)
+    test_preds = bag_best.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### Adaboost
+ab = AdaBoostClassifier(n_estimators=35)
+ab.fit(x_res,y_res)
+ab_pred = ab.predict(x_test)
+acc = metrics.confusion_matrix(y_test,ab_pred)
 plot_confusion_matrix(acc, classes,
-                      title='GDA - SMOTE Confusion Matrix', normalize=True)
+                      title='AdaBoost', normalize=True)
 
 
-### SVM with original data
-clf = SVC(gamma='scale')
-clf.fit(x_train, y_train)
-svm_pred = clf.predict(x_test)
+## Neural net optimizing hyperparameters
 
-acc = metrics.confusion_matrix(y_test,svm_pred)
-plot_confusion_matrix(acc, classes,
-                     title='SVM RBF Confusion Matrix', normalize=True)
+nnet = MLPClassifier(alpha=1e-5)
 
-### SVM with SMOTE
-clf2 = SVC(gamma='scale')
-clf2.fit(x_res, y_res)
-svm_pred2 = clf2.predict(x_test)
+parameters ={
+'learning_rate': ["constant", "invscaling", "adaptive"],
+'hidden_layer_sizes': [(138,60,2), (100,10), (60,5,1), (75,30,5), (138)],
+'activation': ["logistic", "tanh"]
+}
 
-acc = metrics.confusion_matrix(y_test,svm_pred2)
-plot_confusion_matrix(acc, classes,
-                     title='SVM RBF - SMOTE Confusion Matrix', normalize=True)
+nn_cv = GridSearchCV(nnet,parameters,cv=5,verbose=3)
+nn_cv.fit(x_res,y_res)
+
+nn_best = nn_cv.best_estimator_
+
+#train and test predictions
+train_nn_pred = nn_best.predict(x_res)
+nn_pred = nn_best.predict(x_test)
+
+a =metrics.confusion_matrix(y_test,nn_pred)
+plot_confusion_matrix(a, classes,title = 'Neural Network', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = nn_best.predict(x_res)
+    test_preds = nn_best.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### SVM hyperparameters
+svm = SVC(gamma='scale')
+
+parameters ={
+'C': (0.01,0.1,1),
+'kernel': ("rbf", "sigmoid","poly")
+}
+
+svm_cv = GridSearchCV(svm,parameters,cv=5,verbose=3)
+svm_cv.fit(x_res,y_res)
+
+svm_best = svm_cv.best_estimator_
+
+#train and test predictions
+train_svm_pred = svm_best.predict(x_res)
+svm_pred = svm_best.predict(x_test)
+
+a =metrics.confusion_matrix(y_test,svm_pred)
+plot_confusion_matrix(a, classes,title = 'SVM', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = svm_best.predict(x_res)
+    test_preds = svm_best.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### combining LR, NN, RF with Ensemble - Voting Classifier
+
+vote_func = VotingClassifier(estimators=[('lr', lr_best), ('rf', rf_best), ('nn', nn_best)])
+vote_func.fit(x_res,y_res)
 
 
-### RF with original data
-rf = RandomForestClassifier(n_estimators = 35, criterion = 'entropy', max_depth=35)
-rf.fit(x_train,y_train)
-rf_pred = rf.predict(x_test)
-acc = metrics.confusion_matrix(y_test,rf_pred)
-plot_confusion_matrix(acc, classes,
-                      title='Random Forest Confusion Matrix', normalize=True)
+vote_preds_f = vote_func.predict(x_test) #test predictions
+vote_preds_t = vote_func.predict(x_res) #train predictions
 
-
-### RF with SMOTE
-rf = RandomForestClassifier(n_estimators = 35, criterion = 'entropy', max_depth=35)
-rf.fit(x_res,y_res)
-rf_pred = rf.predict(x_test)
-acc = metrics.confusion_matrix(y_test,rf_pred)
-plot_confusion_matrix(acc, classes,
-                      title='Random Forest - SMOTE Confusion Matrix', normalize=True)
+a = metrics.confusion_matrix(y_test,vote_preds_f)
+plot_confusion_matrix(a, classes,title = 'Voting Classifier', normalize=True)
 
 
 ############# Water Quantity #############
@@ -388,26 +546,10 @@ x_train, x_test, y_train, y_test = train_test_split(df_quant.drop(columns='quant
 #five classes of our output variable
 classes_quant = ['Dry', 'Enough', 'Insufficient', 'Seasonal','Unknown']
 
-#Encoding the three output classes into integers
+#Encoding the five output classes into integers
 enc = preprocessing.LabelEncoder()
 enc.fit(y_train)
 train_labels = enc.transform(y_train)
-
-enc = preprocessing.LabelEncoder()
-enc.fit(y_test)
-test_labels = enc.transform(y_test)
-
-
-### LogReg with original data
-logreg = LogisticRegression()
-logreg.fit(x_train,train_labels)
-y_pred=logreg.predict(x_test)
-
-acc = metrics.confusion_matrix(test_labels,y_pred)
-
-plot_confusion_matrix(acc, classes,
-                      title = 'Logistic Regression Confusion Matrix', normalize=True)
-
 
 # SMOTE resampling to deal with class imbalance
 sm = SMOTE()
@@ -417,75 +559,255 @@ enc = preprocessing.LabelEncoder()
 enc.fit(y_res)
 train_labels = enc.transform(y_res)
 
+## LR
 logreg = LogisticRegression()
 logreg.fit(x_res,train_labels)
 y_pred=logreg.predict(x_test)
 
-acc = metrics.confusion_matrix(test_labels,y_pred)
+lr_acc = metrics.confusion_matrix(test_labels,y_pred)
 
-plot_confusion_matrix(acc, classes_quant,title = 'Logistic Regression - SMOTE Confusion Matrix', normalize=True)
+plot_confusion_matrix(lr_acc, classes_quant,title = 'Logistic Regression', normalize=True)
 
+#optimizing hyperparameters
+"""
+We used GridSearchCV which performs k-fold cross validation (k=5 for us) and searches
+a grid of specified parameters to find the best parameters.
+"""
+param_dist = {
+'penalty': ['l1','l2'],
+'C': [0.001,0.01,0.5,1]
+}
 
-#### GDA with original data
-clf = LinearDiscriminantAnalysis()
-clf.fit(x_train, y_train)
-gda_pred = clf.predict(x_test)
+lr_search= GridSearchCV(LogisticRegression(solver='liblinear', multi_class='auto'),param_dist,cv=5)
+lr_search.fit(x_res,y_res)
 
-acc = metrics.confusion_matrix(y_test,gda_pred)
+lr_best_qt = lr_search.best_estimator_ #best classifier found with GridSearchCV
 
+lr_preds = lr_best_qt.predict(x_test)
+train_preds = lr_best_qt.predict(x_res)
+
+a = metrics.confusion_matrix(y_test,lr_preds)
+plot_confusion_matrix(a, classes_quant,title = 'Logistic Regression with L2 Penalty, C = 1'), normalize=True)
+
+#calculating microaveraged F1 scores for train and test
+f1_LR_train = metrics.f1_score(y_res,train_preds,average = 'micro')
+f1_LR_test = metrics.f1_score(y_test,lr_preds,average = 'micro')
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+#getting the indices for the 5-fold cross validation of the test set (25% of original data)
+kf = KFold(n_splits=5)
+k_indices = []
+for _, test_index in kf.split(x_test):
+    k_indices.append(test_index)
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = lr_best_qt.predict(x_res)
+    test_preds = lr_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### RF optimizing hyperparameters
+parameters = {'n_estimators':(100,75,45,20),'max_depth':(45,30,25,20)}
+rf = RandomForestClassifier(criterion = 'entropy',min_samples_leaf = 5, min_samples_split = 10)
+rf_cv = GridSearchCV(rf,parameters,cv=5,verbose=3)
+rf_cv.fit(x_res,y_res)
+
+rf_best_qt = rf_cv.best_estimator_
+
+#train and test predictions
+train_rf_pred = rf_best_qt.predict(x_res)
+rf_pred = rf_best_qt.predict(x_test)
+
+#calculating microaveraged F1 scores for train and test
+f1_rf_train = metrics.f1_score(y_res,train_rf_pred,average = 'micro')
+f1_rf_test = metrics.f1_score(y_test,rf_pred,average = 'micro')
+
+a =metrics.confusion_matrix(y_test,rf_pred)
+plot_confusion_matrix(a, classes_quant,title = 'Random Forest, 45 Estimators', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = rf_best_qt.predict(x_res)
+    test_preds = rf_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### Bagging optimizing hyperparameters
+bag = BaggingClassifier()
+bag.fit(x_res,y_res)
+bag_pred = bag.predict(x_test)
+acc = metrics.confusion_matrix(y_test,bag_pred)
 plot_confusion_matrix(acc, classes_quant,
-                      title='GDA Confusion Matrix', normalize=True)
+                      title='Bagging', normalize=True)
 
-### GDA with SMOTE
-clf = LinearDiscriminantAnalysis()
-clf.fit(x_res, y_res)
-gda_pred = clf.predict(x_test)
+parameters = {'n_estimators':(100,75,45,20),'max_samples':(45,20,10,5),'max_features':(138,70,25)}
+bag_cv = GridSearchCV(bag,parameters,cv=5,verbose=3)
+bag_cv.fit(x_res,y_res)
 
-acc = metrics.confusion_matrix(y_test,gda_pred)
+bag_best_qt = bag_cv.best_estimator_
 
-plot_confusion_matrix(acc, classes_quant,
-                      title='GDA - SMOTE Confusion Matrix', normalize=True)
+#train and test predictions
+train_bag_pred = bag_best_qt.predict(x_res)
+bag_pred = bag_best_qt.predict(x_test)
+
+#calculating microaveraged F1 scores for train and test
+f1_bag_train = metrics.f1_score(y_res,train_bag_pred,average = 'micro')
+f1_bag_test = metrics.f1_score(y_test,bag_pred,average = 'micro')
+
+a =metrics.confusion_matrix(y_test,bag_pred)
+plot_confusion_matrix(a, classes_quant,title = 'Bagging', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = bag_best_qt.predict(x_res)
+    test_preds = bag_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### Adaboost
+ab = AdaBoostClassifier(n_estimators=35)
+ab.fit(x_res,y_res)
+ab_pred = ab.predict(x_test)
+acc = metrics.confusion_matrix(y_test,ab_pred)
+plot_confusion_matrix(acc, classes,
+                      title='AdaBoost', normalize=True)
 
 
-### SVM with original data
-clf = SVC(gamma='scale')
-clf.fit(x_train, y_train)
-svm_pred = clf.predict(x_test)
+## Neural net optimizing hyperparameters
 
-acc = metrics.confusion_matrix(y_test,svm_pred)
-plot_confusion_matrix(acc, classes_quant,
-                      title='SVM RBF Confusion Matrix', normalize=True)
+nnet = MLPClassifier(alpha=1e-5)
 
-### SVM with SMOTE
-clf2 = SVC(gamma='scale')
-clf2.fit(x_res, y_res)
-svm_pred2 = clf2.predict(x_test)
+parameters ={
+'learning_rate': ["constant", "invscaling", "adaptive"],
+'hidden_layer_sizes': [(137,50,2), (80,10), (60,15), (75,30,5), (137)],
+'activation': ["logistic", "tanh"]
+}
 
-acc = metrics.confusion_matrix(y_test,svm_pred2)
-plot_confusion_matrix(acc, classes_quant,
-                      title='SVM RBF - SMOTE Confusion Matrix', normalize=True)
+nn_cv = GridSearchCV(nnet,parameters,cv=5,verbose=3)
+nn_cv.fit(x_res,y_res)
+
+nn_best_qt = nn_cv.best_estimator_
+
+#train and test predictions
+train_nn_pred = nn_best_qt.predict(x_res)
+nn_pred = nn_best_qt.predict(x_test)
+
+a =metrics.confusion_matrix(y_test,nn_pred)
+plot_confusion_matrix(a, classes,title = 'Neural Network', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = nn_best_qt.predict(x_res)
+    test_preds = nn_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### SVM hyperparameters
+svm = SVC(gamma='scale')
+
+parameters ={
+'C': (0.01,0.1,1),
+'kernel': ("rbf", "sigmoid","poly")
+}
+
+svm_cv = GridSearchCV(svm,parameters,cv=5,verbose=3)
+svm_cv.fit(x_res,y_res)
+
+svm_best_qt = svm_cv.best_estimator_
+
+#train and test predictions
+train_svm_pred = svm_best_qt.predict(x_res)
+svm_pred = svm_best_qt.predict(x_test)
+
+a =metrics.confusion_matrix(y_test,svm_pred)
+plot_confusion_matrix(a, classes,title = 'SVM', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = svm_best_qt.predict(x_res)
+    test_preds = svm_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### combining LR, NN, RF with Ensemble - Voting Classifier
+
+vote_quant = VotingClassifier(estimators=[('lr', lr_best_qt), ('rf', rf_best_qt), ('nn', nn_best_qt)])
+vote_quant.fit(x_res,y_res)
 
 
-### RF with original data
-rf = RandomForestClassifier(n_estimators = 35, criterion = 'entropy', max_depth=35)
-rf.fit(x_train,y_train)
+vote_preds_f = vote_quant.predict(x_test) #test predictions
+vote_preds_t = vote_quant.predict(x_res) #train predictions
 
-rf_pred = rf.predict(x_test)
-acc = metrics.confusion_matrix(y_test,rf_pred)
-plot_confusion_matrix(acc, classes_quant,
-                      title='Random Forest Confusion Matrix', normalize=True)
+a = metrics.confusion_matrix(y_test,vote_preds_f)
+plot_confusion_matrix(a, classes_qual,title = 'Voting Classifier', normalize=True)
 
 
-### RF with SMOTE
-rf = RandomForestClassifier(n_estimators = 35, criterion = 'entropy', max_depth=35)
-rf.fit(x_res,y_res)
-
-rf_pred = rf.predict(x_test)
-acc = metrics.confusion_matrix(y_test,rf_pred)
-plot_confusion_matrix(acc, classes_quant,
-                      title='Random Forest - SMOTE Confusion Matrix', normalize=True)
-
-############# Water Quality Prediction #############
+############# Water Quality #############
 df_qual = df.copy()
 
 #OHE process for quantity and functionality - used as predictors for water quality
@@ -518,21 +840,6 @@ enc = preprocessing.LabelEncoder()
 enc.fit(y_train)
 train_labels = enc.transform(y_train)
 
-enc = preprocessing.LabelEncoder()
-enc.fit(y_test)
-test_labels = enc.transform(y_test)
-
-# Normal logreg
-### LogReg with original data
-logreg = LogisticRegression()
-logreg.fit(x_train,train_labels)
-y_pred=logreg.predict(x_test)
-
-acc = metrics.confusion_matrix(test_labels,y_pred)
-
-plot_confusion_matrix(acc, classes,
-                      title = 'Logistic Regression Confusion Matrix', normalize=True)
-
 # SMOTE resampling to deal with class imbalance
 sm = SMOTE()
 x_res,y_res = sm.fit_resample(x_train,y_train)
@@ -541,163 +848,249 @@ enc = preprocessing.LabelEncoder()
 enc.fit(y_res)
 train_labels = enc.transform(y_res)
 
+## LR
 logreg = LogisticRegression()
 logreg.fit(x_res,train_labels)
 y_pred=logreg.predict(x_test)
 
-acc = metrics.confusion_matrix(test_labels,y_pred)
+lr_acc = metrics.confusion_matrix(test_labels,y_pred)
 
-plot_confusion_matrix(acc, classes_quant,title = 'Logistic Regression - SMOTE Confusion Matrix', normalize=True)
+plot_confusion_matrix(lr_acc, classes,title = 'Logistic Regression', normalize=True)
 
-
-#### GDA with original data
-clf = LinearDiscriminantAnalysis()
-clf.fit(x_train, y_train)
-gda_pred = clf.predict(x_test)
-
-acc = metrics.confusion_matrix(y_test,gda_pred)
-
-plot_confusion_matrix(acc, classes_quant,
-                      title='GDA Confusion Matrix', normalize=True)
-
-### GDA with SMOTE
-clf = LinearDiscriminantAnalysis()
-clf.fit(x_res, y_res)
-gda_pred = clf.predict(x_test)
-
-acc = metrics.confusion_matrix(y_test,gda_pred)
-
-plot_confusion_matrix(acc, classes_quant,
-                      title='GDA - SMOTE Confusion Matrix', normalize=True)
-
-
-### SVM with original data
-clf = SVC(gamma='scale')
-clf.fit(x_train, y_train)
-svm_pred = clf.predict(x_test)
-
-acc = metrics.confusion_matrix(y_test,svm_pred)
-plot_confusion_matrix(acc, classes_quant,
-                      title='SVM RBF Confusion Matrix', normalize=True)
-
-### SVM with SMOTE
-clf2 = SVC(gamma='scale')
-clf2.fit(x_res, y_res)
-svm_pred2 = clf2.predict(x_test)
-
-acc = metrics.confusion_matrix(y_test,svm_pred2)
-plot_confusion_matrix(acc, classes_quant,
-                      title='SVM RBF - SMOTE Confusion Matrix', normalize=True)
-
-
-### RF with original data
-rf = RandomForestClassifier(n_estimators = 35, criterion = 'entropy', max_depth=35)
-rf.fit(x_train,y_train)
-
-rf_pred = rf.predict(x_test)
-acc = metrics.confusion_matrix(y_test,rf_pred)
-plot_confusion_matrix(acc, classes_quant,
-                      title='Random Forest Confusion Matrix', normalize=True)
-
-
-### RF with SMOTE
-rf = RandomForestClassifier(n_estimators = 35, criterion = 'entropy', max_depth=35)
-rf.fit(x_res,y_res)
-
-rf_pred = rf.predict(x_test)
-acc = metrics.confusion_matrix(y_test,rf_pred)
-plot_confusion_matrix(acc, classes_quant,
-                      title='Random Forest - SMOTE Confusion Matrix', normalize=True)
-
-
-##### MAPS #####
+#optimizing hyperparameters
 """
-The three blocks of code below will plot each of our output variables onto
-individual maps. All points are colored by their class, indicated in the legend
-at the bottom of each map.  
+We used GridSearchCV which performs k-fold cross validation (k=5 for us) and searches
+a grid of specified parameters to find the best parameters.
 """
-ullat = np.nanmax(df['latitude'])
-ullon = np.nanmin(df['longitude'])
-lrlat = np.nanmin(df['latitude'])
-lrlon = np.nanmax(df['longitude'])
+param_dist = {
+'penalty': ['l1','l2'],
+'C': [0.001,0.01,0.5,1]
+}
 
-lat = np.arange(ullat, lrlat,0.05)
-lon = np.arange(ullon,lrlon,0.05)
-x,y=np.meshgrid(lon,lat)
+lr_search= GridSearchCV(LogisticRegression(solver='liblinear', multi_class='auto'),param_dist,cv=5)
+lr_search.fit(x_res,y_res)
 
-longs = np.asarray(df['longitude'])
-lats = np.asarray(df['latitude'])
+lr_best_qt = lr_search.best_estimator_ #best classifier found with GridSearchCV
 
-# FUNCTIONALITY
-plt.figure(figsize = (10,8))
-m = Basemap(projection='cyl', llcrnrlat=lrlat , urcrnrlat=ullat , llcrnrlon= ullon, urcrnrlon=lrlon ,resolution = 'i', lon_0=0)
-m.drawmapboundary(fill_color='skyblue')
-    # fill continents, set lake color same as ocean color.
-m.fillcontinents(color='tan',lake_color='skyblue')
+lr_preds = lr_best_qt.predict(x_test)
+train_preds = lr_best_qt.predict(x_res)
 
-plt.scatter(longs[df['labels']=='functional'],lats[df['labels']=='functional'], c = 'green', s =2, label = 'Functional', zorder=12, alpha = 0.3)
-plt.scatter(longs[df['labels']=='functional needs repair'],lats[df['labels']=='functional needs repair'], c = 'purple', s =2, label = 'Needs Repair',zorder=12)
-plt.scatter(longs[df['labels']=='non functional'],lats[df['labels']=='non functional'], c = 'red', s =2, label = 'Non-Functional', zorder=11)
-#draw coastlines and map boundaries
-m.drawcoastlines()
-m.drawcountries()
-plt.xticks(np.arange(np.ceil(ullon),lrlon,4))
-plt.yticks(np.arange(-1,lrlat,-4))
-plt.xlabel('Longitude')
-plt.ylabel('Latitude')
-leg = plt.legend(markerscale = 5)
-for lh in leg.legendHandles:
-    lh.set_alpha(1)
-plt.title('Functionality of Water Pumps in Sub-Saharan Africa')
-plt.tight_layout()
+a = metrics.confusion_matrix(y_test,lr_preds)
+plot_confusion_matrix(a, classes,title = 'Logistic Regression with L2 Penalty, C = 1'), normalize=True)
 
-# QUALITY
-plt.figure(figsize = (10,8))
-m = Basemap(projection='cyl', llcrnrlat=lrlat , urcrnrlat=ullat , llcrnrlon= ullon, urcrnrlon=lrlon ,resolution = 'i', lon_0=0)
-m.drawmapboundary(fill_color='skyblue')
-    # fill continents, set lake color same as ocean color.
-m.fillcontinents(color='tan',lake_color='skyblue')
+#calculating microaveraged F1 scores for train and test
+f1_LR_train = metrics.f1_score(y_res,train_preds,average = 'micro')
+f1_LR_test = metrics.f1_score(y_test,lr_preds,average = 'micro')
 
-color = ['teal', 'purple', 'green', 'white', 'yellow', 'red']
-for num,val in enumerate(np.unique(df['quality_group'])):
-    if val == 'good':
-        plt.scatter(longs[df['quality_group']==val],lats[df['quality_group']==val], c = color[num], zorder = 2, s =2, label = val, alpha = 0.3)
-    else:
-        plt.scatter(longs[df['quality_group']==val],lats[df['quality_group']==val], c = color[num], zorder = num+10, s =2, label = val, alpha = 0.3)
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
 
-#draw coastlines and map boundaries
-m.drawcoastlines()
-m.drawcountries()
-plt.xticks(np.arange(np.ceil(ullon),lrlon,4))
-plt.yticks(np.arange(-1,lrlat,-4))
-plt.xlabel('Longitude')
-plt.ylabel('Latitude')
-leg = plt.legend(markerscale = 5)
-for lh in leg.legendHandles:
-    lh.set_alpha(1)
-plt.title('Water Quality in Sub-Saharan Africa')
-plt.tight_layout()
+#getting the indices for the 5-fold cross validation of the test set (25% of original data)
+kf = KFold(n_splits=5)
+k_indices = []
+for _, test_index in kf.split(x_test):
+    k_indices.append(test_index)
 
-# QUANTITY
-plt.figure(figsize = (10,8))
-m = Basemap(projection='cyl', llcrnrlat=lrlat , urcrnrlat=ullat , llcrnrlon= ullon, urcrnrlon=lrlon ,resolution = 'i', lon_0=0)
-m.drawmapboundary(fill_color='skyblue')
-    # fill continents, set lake color same as ocean color.
-m.fillcontinents(color='tan',lake_color='skyblue')
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = lr_best_qt.predict(x_res)
+    test_preds = lr_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
 
-color = ['red', 'green', 'purple', 'orange', 'yellow']
-for num,val in enumerate(np.unique(df['quantity_group'])):
-    plt.scatter(longs[df['quantity_group']==val],lats[df['quantity_group']==val], c = color[num], zorder = num+10, s =3, label = val)
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
 
-#draw coastlines and map boundaries
-m.drawcoastlines()
-m.drawcountries()
-plt.xticks(np.arange(np.ceil(ullon),lrlon,4))
-plt.yticks(np.arange(-1,lrlat,-4))
-plt.xlabel('Longitude')
-plt.ylabel('Latitude')
-leg = plt.legend(markerscale = 5)
-for lh in leg.legendHandles:
-    lh.set_alpha(1)
-plt.title('Water Quantity in Sub-Saharan Africa')
-plt.tight_layout()
+### RF optimizing hyperparameters
+parameters = {'n_estimators':(100,75,45,20),'max_depth':(45,30,25,20)}
+rf = RandomForestClassifier(criterion = 'entropy',min_samples_leaf = 5, min_samples_split = 10)
+rf_cv = GridSearchCV(rf,parameters,cv=5,verbose=3)
+rf_cv.fit(x_res,y_res)
+
+rf_best_qt = rf_cv.best_estimator_
+
+#train and test predictions
+train_rf_pred = rf_best_qt.predict(x_res)
+rf_pred = rf_best_qt.predict(x_test)
+
+#calculating microaveraged F1 scores for train and test
+f1_rf_train = metrics.f1_score(y_res,train_rf_pred,average = 'micro')
+f1_rf_test = metrics.f1_score(y_test,rf_pred,average = 'micro')
+
+a =metrics.confusion_matrix(y_test,rf_pred)
+plot_confusion_matrix(a, classes_qual,title = 'Random Forest, 45 Estimators', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = rf_best_qt.predict(x_res)
+    test_preds = rf_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### Bagging optimizing hyperparameters
+bag = BaggingClassifier()
+bag.fit(x_res,y_res)
+bag_pred = bag.predict(x_test)
+acc = metrics.confusion_matrix(y_test,bag_pred)
+plot_confusion_matrix(acc, classes,
+                      title='Bagging', normalize=True)
+
+parameters = {'n_estimators':(100,75,45,20),'max_samples':(45,20,10,5),'max_features':(138,70,25)}
+bag_cv = GridSearchCV(bag,parameters,cv=5,verbose=3)
+bag_cv.fit(x_res,y_res)
+
+bag_best_qt = bag_cv.best_estimator_
+
+#train and test predictions
+train_bag_pred = bag_best_qt.predict(x_res)
+bag_pred = bag_best_qt.predict(x_test)
+
+#calculating microaveraged F1 scores for train and test
+f1_bag_train = metrics.f1_score(y_res,train_bag_pred,average = 'micro')
+f1_bag_test = metrics.f1_score(y_test,bag_pred,average = 'micro')
+
+a =metrics.confusion_matrix(y_test,bag_pred)
+plot_confusion_matrix(a, classes,title = 'Bagging', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = bag_best_qt.predict(x_res)
+    test_preds = bag_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### Adaboost
+ab = AdaBoostClassifier(n_estimators=35)
+ab.fit(x_res,y_res)
+ab_pred = ab.predict(x_test)
+acc = metrics.confusion_matrix(y_test,ab_pred)
+plot_confusion_matrix(acc, classes,
+                      title='AdaBoost', normalize=True)
+
+
+## Neural net optimizing hyperparameters
+
+nnet = MLPClassifier(alpha=1e-5)
+
+parameters ={
+'learning_rate': ["constant", "invscaling", "adaptive"],
+'hidden_layer_sizes': [(137,50,2), (80,10), (60,15), (75,30,5), (137)],
+'activation': ["logistic", "tanh"]
+}
+
+nn_cv = GridSearchCV(nnet,parameters,cv=5,verbose=3)
+nn_cv.fit(x_res,y_res)
+
+nn_best_qt = nn_cv.best_estimator_
+
+#train and test predictions
+train_nn_pred = nn_best_qt.predict(x_res)
+nn_pred = nn_best_qt.predict(x_test)
+
+a =metrics.confusion_matrix(y_test,nn_pred)
+plot_confusion_matrix(a, classes,title = 'Neural Network', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = nn_best_qt.predict(x_res)
+    test_preds = nn_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### SVM hyperparameters
+svm = SVC(gamma='scale')
+
+parameters ={
+'C': (0.01,0.1,1),
+'kernel': ("rbf", "sigmoid","poly")
+}
+
+svm_cv = GridSearchCV(svm,parameters,cv=5,verbose=3)
+svm_cv.fit(x_res,y_res)
+
+svm_best_qt = svm_cv.best_estimator_
+
+#train and test predictions
+train_svm_pred = svm_best_qt.predict(x_res)
+svm_pred = svm_best_qt.predict(x_test)
+
+a =metrics.confusion_matrix(y_test,svm_pred)
+plot_confusion_matrix(a, classes,title = 'SVM', normalize=True)
+
+#Performing 5-fold CV on test set:
+f1_train = []
+f1_test = []
+mcc_train = []
+mcc_test = []
+
+for i in range(5):
+    inds = k_indices[i]
+    x_t,y_t = np.asarray(x_test)[inds],np.asarray(y_test)[inds]
+    train_preds = svm_best_qt.predict(x_res)
+    test_preds = svm_best_qt.predict(x_t)
+    f1_train.append(metrics.f1_score(y_res,train_preds,average = "micro"))
+    f1_test.append(metrics.f1_score(y_t,test_preds,average = "micro"))
+    mcc_train.append(metrics.matthews_corrcoef(y_res,train_preds)
+    mcc_test.append(metrics.matthews_corrcoef(y_t,test_preds)
+    print(i)
+
+print(np.nanmean(f1_test))
+print(np.nanmean(mcc_test))
+
+### combining LR, NN, RF with Ensemble - Voting Classifier
+
+vote_quant = VotingClassifier(estimators=[('lr', lr_best_qt), ('rf', rf_best_qt), ('nn', nn_best_qt)])
+vote_quant.fit(x_res,y_res)
+
+
+vote_preds_f = vote_quant.predict(x_test) #test predictions
+vote_preds_t = vote_quant.predict(x_res) #train predictions
+
+a = metrics.confusion_matrix(y_test,vote_preds_f)
+plot_confusion_matrix(a, classes_qual,title = 'Voting Classifier', normalize=True)
